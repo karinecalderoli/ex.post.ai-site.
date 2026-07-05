@@ -14,8 +14,12 @@ import { prisma } from "./prisma";
 export const { handlers, auth, signIn, signOut } = NextAuth({
   providers: [
     Google({
-      clientId: process.env.GOOGLE_CLIENT_ID!,
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
+      // usa string vazia como reserva em vez de deixar undefined — isso
+      // impede que a compilação quebre quando as chaves ainda não foram
+      // configuradas. O login simplesmente não vai funcionar até você
+      // preencher GOOGLE_CLIENT_ID/SECRET de verdade.
+      clientId: process.env.GOOGLE_CLIENT_ID || "",
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET || "",
     }),
   ],
   callbacks: {
