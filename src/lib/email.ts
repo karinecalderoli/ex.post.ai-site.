@@ -1,10 +1,15 @@
 import { Resend } from "resend";
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+// Criado só na hora de usar (não no carregamento do módulo) — assim a
+// compilação não quebra quando RESEND_API_KEY ainda não foi configurada.
+function getResendClient() {
+  return new Resend(process.env.RESEND_API_KEY || "re_placeholder_sem_chave_configurada");
+}
 
 export async function sendActivationEmail(params: { to: string; activationCode: string; loginUrl: string }) {
+  const resend = getResendClient();
   await resend.emails.send({
-    from: process.env.EMAIL_FROM!,
+    from: process.env.EMAIL_FROM || "ExPost AI <contas@expost.ai>",
     to: params.to,
     subject: "Sua assinatura ExPost AI está confirmada",
     html: `
@@ -20,9 +25,10 @@ export async function sendNewContentEmail(params: {
   to: string[];
   kind: "videos" | "wallpapers";
 }) {
+  const resend = getResendClient();
   const label = params.kind === "videos" ? "novos vídeos" : "novos wallpapers";
   await resend.emails.send({
-    from: process.env.EMAIL_FROM!,
+    from: process.env.EMAIL_FROM || "ExPost AI <contas@expost.ai>",
     to: params.to,
     subject: `Novidades na biblioteca premium: ${label}`,
     html: `<p>A biblioteca premium da ExPost AI acabou de receber ${label}. Acesse a plataforma para conferir.</p>`,
