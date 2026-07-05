@@ -1,0 +1,320 @@
+// ExPost AI — schema de banco de dados
+// PostgreSQL + Prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// CONTAS E ASSINATURA
+// ---------------------------------------------------------------------------
+
+enum AccountStatus {
+  PENDING_ACTIVATION // código gerado, aguardando primeiro acesso
+  ACTIVE
+  BLOCKED            // assinatura expirada/cancelada/pagamento não confirmado
+  ADMIN_BLOCKED      // bloqueado manualmente pelo painel admin
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+model User {
+  id            String        @id @default(cuid())
+  email         String        @unique
+  passwordHash  String?       // null até o usuário criar senha na ativação
+  name          String?
+  role          Role          @default(USER)
+  status        AccountStatus @default(PENDING_ACTIVATION)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  license           License?
+  connectedAccounts ConnectedAccount[]
+  userVideos        UserVideo[]
+  userWallpapers    UserWallpaper[]
+  favoriteWallpapers FavoriteWallpaper[]
+  scheduledPosts    ScheduledPost[]
+  publishHistory    PublishHistory[]
+  notifications     Notification[]
+
+  @@index([email])
+}
+
+// Gerado a partir do webhook da Cakto após confirmação de pagamento.
+model License {
+  id                String    @id @default(cuid())
+  user              User      @relation(fields: [userId], references: [id])
+  userId            String    @unique
+  activationCode    String    @unique
+  activationCodeUsed Boolean  @default(false)
+  caktoCustomerEmail String
+  caktoSubscriptionId String  @unique
+  status            SubscriptionStatus @default(PENDING)
+  currentPeriodEnd  DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+}
+
+enum SubscriptionStatus {
+  PENDING    // aguardando confirmação de pagamento
+  ACTIVE
+  CANCELED
+  PAST_DUE
+  EXPIRED
+}
+
+// Log bruto de todos os webhooks recebidos da Cakto, para auditoria/replay.
+model CaktoWebhookEvent {
+  id           String   @id @default(cuid())
+  eventType    String
+  payload      Json
+  processed    Boolean  @default(false)
+  receivedAt   DateTime @default(now())
+  processedAt  DateTime?
+  error        String?
+}
+
+// ---------------------------------------------------------------------------
+// REDES SOCIAIS CONECTADAS (OAuth oficial)
+// ---------------------------------------------------------------------------
+
+enum Platform {
+  YOUTUBE
+  TIKTOK
+  INSTAGRAM
+  FACEBOOK
+  X_TWITTER
+  LINKEDIN
+  PINTEREST
+}
+
+model ConnectedAccount {
+  id            String   @id @default(cuid())
+  user          User     @relation(fields: [userId], references: [id])
+  userId        String
+  platform      Platform
+  externalId    String   // id da conta na plataforma
+  displayName   String?
+  accessToken   String   // sempre armazenar criptografado (ver src/lib/crypto.ts)
+  refreshToken  String?
+  tokenExpiresAt DateTime?
+  scopes        String[]
+  connectedAt   DateTime @default(now())
+  revokedAt     DateTime?
+
+  @@unique([userId, platform])
+}
+
+// ---------------------------------------------------------------------------
+// BIBLIOTECA DE VÍDEOS
+// ---------------------------------------------------------------------------
+
+model VideoCollection {
+  id          String        @id @default(cuid())
+  name        String
+  description String?
+  premiumVideos PremiumVideo[]
+  createdAt   DateTime      @default(now())
+}
+
+// Adicionados apenas pelo administrador. Ilimitados, permanentes.
+model PremiumVideo {
+  id           String    @id @default(cuid())
+  title        String
+  description  String?
+  s3Key        String
+  thumbnailKey String?
+  category     String
+  niche        String?
+  durationSec  Int
+  tags         String[]
+  collection   VideoCollection? @relation(fields: [collectionId], references: [id])
+  collectionId String?
+  addedByAdminId String
+  createdAt    DateTime  @default(now())
+
+  @@index([category])
+  @@index([tags])
+}
+
+// Enviados pelo próprio usuário. Privados, limite de 10/semana, sujeitos a expiração.
+model UserVideo {
+  id            String    @id @default(cuid())
+  user          User      @relation(fields: [userId], references: [id])
+  userId        String
+  title         String?
+  s3Key         String
+  durationSec   Int?
+  uploadedAt    DateTime  @default(now())
+  expiresAt     DateTime? // limpeza automática após período/publicação
+  publishedAt   DateTime?
+
+  @@index([userId, uploadedAt])
+}
+
+// Corte de uma cena dentro de um vídeo (premium ou pessoal) — usado no editor.
+model VideoScene {
+  id            String    @id @default(cuid())
+  sourceType    SourceType
+  premiumVideoId String?
+  userVideoId   String?
+  startMs       Int
+  endMs         Int
+  cropRatio     CropRatio @default(RATIO_9_16)
+  logoOverlay   Json?     // { s3Key, position, sizePct, opacityPct }
+  textOverlay   Json?     // { content, position, style }
+  aiTitle       String?
+  aiDescription String?
+  aiHashtags    String[]
+  createdAt     DateTime  @default(now())
+}
+
+enum SourceType {
+  PREMIUM
+  USER_UPLOAD
+}
+
+enum CropRatio {
+  RATIO_16_9
+  RATIO_9_16
+  RATIO_1_1
+}
+
+// ---------------------------------------------------------------------------
+// AGENDAMENTO E PUBLICAÇÃO
+// ---------------------------------------------------------------------------
+
+model ScheduledPost {
+  id            String    @id @default(cuid())
+  user          User      @relation(fields: [userId], references: [id])
+  userId        String
+  videoSceneId  String
+  platform      Platform
+  scheduledFor  DateTime
+  status        ScheduleStatus @default(SCHEDULED)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Regra de negócio: máx. 5 agendamentos por usuário por dia (validada na
+  // camada de aplicação — ver src/lib/scheduling.ts — não é possível expressar
+  // "máx N por dia" como constraint nativa do Postgres/Prisma).
+  @@index([userId, scheduledFor])
+}
+
+enum ScheduleStatus {
+  SCHEDULED
+  PUBLISHED
+  FAILED
+  CANCELED
+}
+
+model PublishHistory {
+  id            String    @id @default(cuid())
+  user          User      @relation(fields: [userId], references: [id])
+  userId        String
+  videoSceneId  String
+  platform      Platform
+  publishedAt   DateTime  @default(now())
+  status        PublishStatus
+  errorMessage  String?
+  externalPostId String?
+  stats         Json?     // views, likes etc., quando a API da plataforma disponibiliza
+
+  @@index([userId, publishedAt])
+}
+
+enum PublishStatus {
+  PUBLISHED
+  FAILED
+}
+
+// ---------------------------------------------------------------------------
+// BIBLIOTECA DE WALLPAPERS
+// ---------------------------------------------------------------------------
+
+enum WallpaperCategory {
+  IA
+  TECNOLOGIA
+  MINIMALISTA
+  ANIME
+  GAMES
+  NATUREZA
+  ESCURO
+  CLARO
+  ABSTRATO
+  OUTROS
+}
+
+model PremiumWallpaper {
+  id           String            @id @default(cuid())
+  name         String
+  category     WallpaperCategory
+  resolution   String            // ex: "3840x2160"
+  tags         String[]
+  s3Key        String
+  previewKey   String
+  publishedAt  DateTime          @default(now())
+  addedByAdminId String
+  favorites    FavoriteWallpaper[]
+
+  @@index([category])
+  @@index([resolution])
+}
+
+model UserWallpaper {
+  id          String   @id @default(cuid())
+  user        User     @relation(fields: [userId], references: [id])
+  userId      String
+  name        String?
+  s3Key       String
+  resolution  String?
+  uploadedAt  DateTime @default(now())
+
+  @@index([userId])
+}
+
+model FavoriteWallpaper {
+  id                 String            @id @default(cuid())
+  user               User              @relation(fields: [userId], references: [id])
+  userId             String
+  premiumWallpaper   PremiumWallpaper  @relation(fields: [premiumWallpaperId], references: [id])
+  premiumWallpaperId String
+  createdAt          DateTime          @default(now())
+
+  @@unique([userId, premiumWallpaperId])
+}
+
+// ---------------------------------------------------------------------------
+// NOTIFICAÇÕES
+// ---------------------------------------------------------------------------
+
+enum NotificationType {
+  NEW_PREMIUM_VIDEOS
+  NEW_WALLPAPERS
+  SCHEDULE_REMINDER
+  PUBLISH_FAILED
+  SUBSCRIPTION_STATUS
+  ADMIN_MESSAGE
+}
+
+model Notification {
+  id        String            @id @default(cuid())
+  user      User              @relation(fields: [userId], references: [id])
+  userId    String
+  type      NotificationType
+  title     String
+  body      String
+  readAt    DateTime?
+  emailSent Boolean           @default(false)
+  createdAt DateTime          @default(now())
+
+  @@index([userId, readAt])
+}
